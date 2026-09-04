@@ -1,577 +1,593 @@
-"""app_co2.py - Project script (example).
+"""src/datafun/app_co2.py - Project script (example).
 
 Author: Denise Case
-Date: 2026-06
+Date: 2026-09
 
-Purpose:
-    - simple linear regression (one numeric feature, one numeric target)
-    - choosing a feature (x) and a target (y) based on EDA findings
-    - fitting a straight line two ways (numpy and scikit-learn)
-    - reading off the slope and intercept
-    - computing fitted values and residuals
-    - examining R-squared and RMSE
-    - making a prediction for a chosen feature value
-    - charting the data, the fitted line, and the residuals
+HOW TO RUN THIS FILE:
 
-Data Source:
-- data/raw/owid-co2-data-subset.csv (from Our World in Data)
-
-Assumptions:
-- The data contains columns like:
-  country, year, co2, co2_per_capita, population, gdp
-
-Terminal command to run this file from the root project folder:
+From the VS Code menu (with only this project open in VS Code),
+click "Terminal" / New Terminal to
+open an integrated Terminal in the root project folder.
+Paste the following command and press ENTER or RETURN
+to run this file as a script:
 
 uv run python -m datafun.app_co2
 
-OBS:
-  Don't edit this file - it should remain a working example.
-  Copy it, rename it, and modify your copy.
+DOMAIN:
 
-  This script does NOT decide for you whether a straight line is a good
-  description of the data. It fits the line and computes the numbers an
-  analyst uses to make that call (residuals, R-squared, RMSE).
-  Whether a relationship is "linear enough" is for the analyst to decide.
-  Doing the analysis is how we find out.
+Our World in Data CO2 emissions data.
+
+The example uses a smaller subset of the full dataset.
+See docs/data-card.md for more information about the dataset.
+
+EXPLORE:
+
+Earlier analysis showed relationships among
+numeric economic and emissions variables.
+
+In this project, we use one numeric feature
+to predict one numeric target
+with a simple linear regression model.
+
+A standard predictive modeling process is:
+
+1. OBSERVE the data and prior findings.
+2. DECLARE the target and feature.
+3. PREPARE the modeling data.
+4. SPLIT into training and test data.
+5. BASELINE with a simple reference model.
+6. TRAIN a LinearRegression model.
+7. PREDICT on X_test.
+8. EVALUATE baseline vs model on y_test.
+9. VISUALIZE predictions and residuals.
+10. ASSESS the results.
+
+DESIGN:
+
+Use this file to declare the data-specific choices
+and the reasoning behind them,
+then orchestrate the work.
+
+Scikit-learn provides the machine learning tools.
+
+The target, feature, split, baseline,
+and model choices stay here because they are
+analytical decisions specific to this project.
 """
 
+# === DECLARE IMPORTS (BRING IN FREE CODE) ===
 
-# === Section 1a. DECLARE IMPORTS (BRING IN FREE CODE) ===
+import logging
+from pathlib import Path
+from typing import Final
 
-import logging  # for type hinting only
-from typing import Final  # for type hinting
-
-from datafun_toolkit.logger import get_logger, log_header
-from matplotlib.axes import Axes
+from datafun_toolkit.logger import get_logger, log_header, log_path
 import matplotlib.pyplot as plt
+from ml_vizkit import save_chart
 import numpy as np
 import pandas as pd
-import seaborn as sns
+from sklearn.dummy import DummyRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, root_mean_squared_error
+from sklearn.model_selection import train_test_split
 
-# Type hint for Axes object (basic plot type returned by Seaborn)
-# A seaborn plot is a set of axes. Set title, labels, etc. on the axes.
-# A figure can contain multiple axes (plots)
-# from matplotlib.figure import Figure
+# === CONFIGURE LOGGER ONCE FOR THE APPLICATION ===
 
-# === Section 1b. CONFIGURE LOGGER ONCE PER MODULE ===
+LOG: logging.Logger = get_logger("P06-CO2", level="DEBUG")
 
-LOG: logging.Logger = get_logger("P07", level="DEBUG")
-log_header(LOG, "P07")
+# === DECLARE GLOBAL CONSTANTS ===
 
-# === Section 1c. Global Constants and Configuration ===
+# Some global variables are CONSTANT.
+# They do NOT change while the program runs.
+# By convention, constants use UPPERCASE_WITH_UNDERSCORES.
+# Final indicates that the value should not be reassigned.
 
-# CUSTOM: These are dataset-specific constants
-# used in multiple places in the code.
-# Inspect or explore the dataset to determine the columns needed.
+# === LOCATE THE DATA FILE ===
 
-# CUSTOM: Data set name
-DATASET_NAME: Final[str] = "owid-co2-data-subset"
+DATA_FILE_PATH: Final[Path] = (
+    Path("data") / "raw" / "owid-co2-data-subset.csv"
+)
 
-# ==========================================================
-# ANALYST CHOICE:
-# Linear regression models one numeric TARGET (y) as a straight-line
-# function of one numeric FEATURE (x):  y = slope * x + intercept
-#
-# Choose the pair from what you saw during EDA. In the EDA script, the
-# correlation matrix and the scatter plot examined gdp (x) vs co2 (y),
-# so that is the pair we investigate here.
-#
-# Choosing a pair does NOT mean we believe the relationship is linear.
-# We fit the line so we can look at how well (or how poorly) it describes
-# the data. That examination is the whole point.
-# ==========================================================
+# === LOCATE THE CHART OUTPUT ===
 
-# CUSTOM: One numeric feature (the predictor, plotted on the x-axis)
-FEATURE_COL: Final[str] = "gdp"
+CHART_DIR: Final[Path] = Path("docs") / "images"
 
-# CUSTOM: One numeric target (the response, plotted on the y-axis)
-TARGET_COL: Final[str] = "co2"
+PREDICTION_CHART_PATH: Final[Path] = (
+    CHART_DIR / "co2-regression-predictions.png"
+)
 
-# CUSTOM: Assign readable labels for the charted variables.
-FEATURE_LABEL: Final[str] = "GDP"
-TARGET_LABEL: Final[str] = "CO2 emissions"
+RESIDUAL_CHART_PATH: Final[Path] = (
+    CHART_DIR / "co2-regression-residuals.png"
+)
 
-# CUSTOM: A single feature value to predict the target for, as an example.
-# Pick a value inside (or near) the range of the data you observed in EDA.
-EXAMPLE_FEATURE_VALUE: Final[float] = 1.0e12  # example GDP value
+# === DETERMINE WHAT ONE ROW REPRESENTS ===
 
-# === Section 1d. Pandas Configuration for Display ===
+GRAIN: Final[str] = "one country or entity in one year"
 
-# Pandas display configuration (helps in notebooks)
-pd.set_option("display.max_columns", 50)
-pd.set_option("display.width", 120)
+# === DECLARE THE TARGET ===
 
+# CUSTOM: Choose one NUMERIC target value to predict.
+# This must match a numeric column name EXACTLY
+# as it appears in the data file.
 
-# === Section 2. Load the Data ===
+TARGET_COLUMN: Final[str] = "co2"
 
+# === DECLARE THE FEATURE ===
 
-def load_data() -> pd.DataFrame:
-    """Load a dataset into a DataFrame.
+# CUSTOM: Choose one NUMERIC feature
+# that might help predict the target.
+# This must match a numeric column name EXACTLY
+# as it appears in the data file.
 
-    This function loads a dataset from a CSV file located in the
-    `data/raw` directory. The dataset name is specified by the
-    `DATASET_NAME` constant.
+FEATURE_COLUMN: Final[str] = "gdp"
 
-    Arguments: None
+# === DOCUMENT WHY THE FEATURE MIGHT HELP ===
 
-    Returns:
-        pd.DataFrame: The loaded dataset.
-    """
-    LOG.info(f"Loading dataset: {DATASET_NAME}")
-    df: pd.DataFrame = pd.read_csv(f"data/raw/{DATASET_NAME}.csv")
-    count_of_rows: int = df.shape[0]
-    count_of_columns: int = df.shape[1]
-    LOG.info(f"Loaded: {count_of_rows} rows, {count_of_columns} columns")
+# CUSTOM: Document the reasoning behind the feature choice.
+# Do not assume the feature will work well.
+# The model and evaluation will provide evidence.
 
-    return df
+FEATURE_DECISION: Final[str] = r"""
+I want to predict CO2 emissions.
 
+I selected GDP as the feature.
 
-# === Section 3. Prepare a Modeling View (Feature + Target Only) ===
+Economic activity often requires energy,
+transportation, manufacturing, construction,
+and other activities that can produce CO2 emissions.
 
+GDP might therefore contain useful information
+for predicting CO2 emissions.
 
-def make_model_view(df: pd.DataFrame) -> pd.DataFrame:
-    """Create a cleaned view containing only the rows we can model.
+I do not know yet how well GDP will predict CO2 emissions.
+The modeling process will provide evidence.
+"""
 
-    Strategy:
-    - Keep the original DataFrame unchanged
-    - Drop rows missing the feature OR the target
+# === DECLARE THE TRAIN / TEST SPLIT ===
 
-    WHY: A regression cannot use a row that is missing either the x value
-    or the y value. We remove those rows up front so the model sees only
-    complete (x, y) pairs.
+# CUSTOM: Decide how much data should be held back for testing.
+# The test data should NOT be used to train the model.
 
-    Arguments:
-        df: The original DataFrame.
+TEST_FRACTION: Final[float] = 0.20
 
-    Returns:
-        pd.DataFrame: A cleaned view with no missing feature/target values.
-    """
-    LOG.info("Creating modeling view (dropping rows missing feature or target)")
+# CUSTOM: Choose whether the random split should be reproducible.
+# A fixed random seed makes the same split each time the script runs.
 
-    # The two columns we require to be non-missing.
-    # FEATURE_COL and TARGET_COL are single strings, so wrap them in a list.
-    cols_required: list[str] = [FEATURE_COL, TARGET_COL]
-    LOG.debug(f"Columns required to be non-missing: {cols_required}")
+RANDOM_SEED: Final[int] = 42
 
-    # dropna(subset=...) only looks at the specified columns, not the whole row.
-    # .copy() creates a new DataFrame so we don't accidentally modify the original.
-    df_model: pd.DataFrame = df.dropna(subset=cols_required).copy()
+# === DOCUMENT THE SPLIT DECISION ===
 
-    # Report what was kept and what was dropped
-    count_original: int = df.shape[0]
-    count_model: int = df_model.shape[0]
-    count_dropped: int = count_original - count_model
+# CUSTOM: Document the reasoning behind BOTH choices.
+# The fraction and random seed should not be unexplained numbers.
 
-    LOG.info(f"Original rows: {count_original}")
-    LOG.info(f"Model rows:    {count_model}")
-    LOG.info(f"Rows dropped:  {count_dropped}")
+SPLIT_DECISION: Final[str] = r"""
+I will use 80% of the modeling rows for training
+and hold back 20% for testing.
 
-    return df_model
+I want most of the available data to be available
+for learning the model,
+while still keeping a separate set of observations
+that the model did not see during training.
 
+The test rows will be used later
+to evaluate how the trained model performs
+on unseen observations.
 
-# === Section 4. Build the Feature Matrix X and Target Vector y ===
+I will use a random seed of 42.
 
+The specific value 42 is not analytically important.
+I use a fixed seed so the random split is reproducible.
+Running the project again will produce the same
+training and test observations,
+which makes results easier to reproduce and compare.
+"""
 
-def build_x_and_y(df_model: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Build X (feature matrix) and y (target vector) for scikit-learn.
+# === DECLARE THE BASELINE ===
 
-    WHY: scikit-learn expects two different shapes:
+BASELINE_STRATEGY: Final[str] = "mean"
 
-    - X must be 2-D, with shape (n_rows, n_features).
-      Even with one feature, it must be (n_rows, 1), that is,
-      a column, not a flat list.
+# === DOCUMENT THE BASELINE DECISION ===
 
-    - y is 1-D, with shape (n_rows,).
+BASELINE_DECISION: Final[str] = r"""
+Before evaluating the LinearRegression model,
+I need a simple baseline for comparison.
 
-    The double-bracket df[[FEATURE_COL]] returns a DataFrame (2-D).
-    The single-bracket df[TARGET_COL] returns a Series (1-D).
-    Converting each to a NumPy array gives the shapes sklearn wants.
+The baseline will ignore GDP
+and predict the average CO2 emissions
+from the training data for every test observation.
 
-    Arguments:
-        df_model: The cleaned modeling view.
+A useful predictive model should improve
+on this simple reference prediction.
+"""
 
-    Returns:
-        tuple[np.ndarray, np.ndarray]: (X with shape (n, 1), y with shape (n,))
-    """
-    LOG.info("Building feature matrix X and target vector y")
+# === DOCUMENT THE MODEL DECISION ===
 
-    # Double brackets -> DataFrame -> 2-D array of shape (n, 1)
-    X: np.ndarray = df_model[[FEATURE_COL]].to_numpy()
+MODEL_DECISION: Final[str] = r"""
+I will use LinearRegression.
 
-    # Single brackets -> Series -> 1-D array of shape (n,)
-    y: np.ndarray = df_model[TARGET_COL].to_numpy()
+Linear regression fits a straight-line relationship
+between the selected feature and target.
 
-    LOG.debug(f"X shape: {X.shape}  (rows, features)")
-    LOG.debug(f"y shape: {y.shape}  (rows,)")
+This gives a simple and interpretable model
+that can be compared with the baseline.
 
-    return X, y
+Fitting a line does not prove that a straight line
+is a good description of the relationship.
 
-
-# === Section 5. Fit a Straight Line ===
-
-
-def fit_line(X: np.ndarray, y: np.ndarray) -> LinearRegression:
-    """Fit a straight line y = slope * x + intercept using scikit-learn.
-
-    WHY: LinearRegression() is the standard tool.
-    The pattern we follow is create a model,
-    call .fit() to train it, then read its results
-    and call .predict()
-
-    That is the SAME pattern used for every other
-    scikit-learn model
-    (other regressions, classification, and beyond).
-    Learning it once carries over.
-
-    The model exposes its learned parameters after fitting:
-    - .coef_      the slope (an array, one value per feature)
-    - .intercept_ the intercept (a single number)
-
-    Arguments:
-        X: Feature matrix of shape (n, 1).
-        y: Target vector of shape (n,).
-
-    Returns:
-        LinearRegression: The fitted scikit-learn model.
-    """
-    LOG.info("Fitting a linear regression (scikit-learn)")
-
-    # Create the model object, then fit to the data.
-    model = LinearRegression()
-    model.fit(X, y)
-
-    # coef_ is an array (one slope per feature); we have one feature.
-    slope: float = float(model.coef_[0])
-    intercept: float = float(model.intercept_)
-    LOG.debug(f"  slope:     {slope:.6g}")
-    LOG.debug(f"  intercept: {intercept:.6g}")
-
-    LOG.info("Fitted line:")
-    LOG.info(f"  {TARGET_COL} = {slope:.6g} * {FEATURE_COL} + {intercept:.6g}")
-
-    # OPTIONAL sanity check.
-    # numpy can fit the same straight line: degree 1 returns
-    # [slope, intercept]. Check these values match.
-    np_slope, np_intercept = np.polyfit(X.ravel(), y, 1)
-    LOG.debug(f"  numpy check -> slope {np_slope:.6g}, intercept {np_intercept:.6g}")
-
-    return model
-
-
-# === Section 6. Predict ===
-
-
-def predict(model: LinearRegression, X: np.ndarray) -> np.ndarray:
-    """Compute fitted values and predict for one example feature value.
-
-    WHY: The fitted values (y_hat) are what
-    the line says y "should" be for each observed x.
-
-    Compare them to the real y to see
-    how far off the line is.
-
-    Show a single prediction for a chosen
-    feature value as an example of using the model.
-
-    Arguments:
-        model: The fitted scikit-learn model.
-        X: Feature matrix of shape (n, 1).
-
-    Returns:
-        np.ndarray: Fitted values y_hat of shape (n,).
-    """
-    LOG.info("Computing fitted values for every observed row")
-    y_hat: np.ndarray = model.predict(X)
-
-    LOG.info(f"Predicting {TARGET_LABEL} for one example {FEATURE_LABEL} value")
-
-    # The model expects a 2-D input of shape (n, 1), even for one value.
-    X_example: np.ndarray = np.array([[EXAMPLE_FEATURE_VALUE]])
-    y_example: float = float(model.predict(X_example)[0])
-
-    LOG.debug(f"  example {FEATURE_COL}: {EXAMPLE_FEATURE_VALUE:.6g}")
-    LOG.debug(f"  predicted {TARGET_COL}: {y_example:.6g}")
-
-    return y_hat
-
-
-# === Section 7. Examine the Fit (Residuals, R-squared, RMSE) ===
-
-
-def examine_fit(
-    model: LinearRegression, X: np.ndarray, y: np.ndarray, y_hat: np.ndarray
-) -> np.ndarray:
-    """Compute the numbers used to judge a linear fit.
-
-    WHY: A line can be fit to ANY pair of numeric columns.
-
-    These numbers are how we decide
-    whether the line is a reasonable description
-    of the data:
-
-    - residual = actual y - fitted y_hat (one per row)
-    How far each point sits above (+) or below (-) the line.
-
-    - R-squared: the fraction of variation in y the line accounts for.
-    Ranges roughly 0 to 1. Higher means the line explains more.
-
-    - RMSE: root mean squared error, in the same units as y.
-    The typical size of a residual.
-
-    The function computes and reports.
-    It does NOT declare the fit "good" or "bad".
-    You read the numbers and the residual plot
-    to make a determination.
-
-    Arguments:
-        model: The fitted scikit-learn model.
-        X: Feature matrix of shape (n, 1).
-        y: Actual target values, shape (n,).
-        y_hat: Fitted target values, shape (n,).
-
-    Returns:
-        np.ndarray: Residuals of shape (n,).
-    """
-    LOG.info("Computing residuals (actual - fitted)")
-    residuals: np.ndarray = y - y_hat
-
-    # R-squared straight from the model
-    # (sklearn's .score is R-squared for regression).
-    # Equivalent to comparing the line to a flat mean line.
-    r_squared: float = float(model.score(X, y))
-
-    # RMSE: square residuals, average them, take square root.
-    rmse: float = float(np.sqrt(np.mean(residuals**2)))
-
-    LOG.info("Fit numbers (requires interpretation):")
-    LOG.debug(f"  R-squared: {r_squared:.4f}")
-    LOG.debug(f"  RMSE:      {rmse:.6g}  (in units of {TARGET_LABEL})")
-    LOG.debug(f"  residual min:  {float(np.min(residuals)):.6g}")
-    LOG.debug(f"  residual max:  {float(np.max(residuals)):.6g}")
-    LOG.debug(f"  residual mean: {float(np.mean(residuals)):.6g}")
-
-    LOG.info("""
-CUSTOM: Update these notes and use Markdown cells to narrate what you see.
-
-How to read these (this is YOUR judgment, not the script's):
-
- - R-squared near 1: the line accounts for most of the variation in y.
- - R-squared near 0: the line accounts for almost none.
- - RMSE: the typical distance between a point and the line, in y's units.
- - Residual plot:
-   - if a straight line fits well, residuals
-     scatter randomly around 0 with no pattern.
-   - A curve,
-   - a funnel (spread that grows or shrinks),
-   - or clusters are signs a straight line
-     is NOT the right description, which can be a useful finding.
-
-There is no threshold that decides this for you.
-Look at the numbers and the plots together and
-write down what you conclude.
-""")
-
-    return residuals
-
-
-# === Section 8. Create Visualizations ===
-
-
-def make_plots(
-    df_model: pd.DataFrame, y_hat: np.ndarray, residuals: np.ndarray
-) -> None:
-    """Create notebook-friendly plots for the regression.
-
-    Arguments:
-        df_model: Cleaned modeling view.
-        y_hat: Fitted values, shape (n,).
-        residuals: Residuals (actual - fitted), shape (n,).
-
-    Returns:
-        None
-
-    WHY: The fitted-line plot shows whether the line tracks the points.
-    The residual plot shows whether what's left over has a pattern.
-    Together they show whether a straight line is a fair description.
-
-    Common charts here:
-    1. A scatter of feature vs target with the fitted line drawn on top.
-    2. A residual plot: residuals vs the feature, with a line at zero.
-    """
-    feature_values: np.ndarray = df_model[FEATURE_COL].to_numpy()
-    target_values: np.ndarray = df_model[TARGET_COL].to_numpy()
-
-    LOG.info("---- Creating Scatter Plot with Fitted Line ----------")
-    LOG.info(f"----   Set x to {FEATURE_LABEL} -----------------------")
-    LOG.info(f"----   Set y to {TARGET_LABEL} -------------------------")
-
-    # Open a fresh blank canvas before a new chart
-    plt.figure()
-
-    # The observed points
-    scatter_plt: Axes = sns.scatterplot(
-        x=feature_values,
-        y=target_values,
-    )
-
-    # The fitted line. Sort by x so the line is drawn left to right.
-    order: np.ndarray = np.argsort(feature_values)
-    scatter_plt.plot(feature_values[order], y_hat[order])
-
-    scatter_plt.set_xlabel(FEATURE_LABEL)
-    scatter_plt.set_ylabel(TARGET_LABEL)
-    scatter_plt.set_title(f"{FEATURE_LABEL} vs {TARGET_LABEL} with fitted line")
-
-    # IN NOTEBOOK: SHOW AS YOU GO
-    #      plt.show() displays the current chart and closes it
-    #      Call this before starting a new chart
-    #      or next chart will be drawn on top of this one
-    # IN SCRIPT: WAIT TO SHOW TILL THE END
-    #      Do not call plt.show() here - let figures accumulate
-    #      so all charts display together with sequential Figure numbers.
-    #      plt.show() is called once at the end of main()
-    # plt.show()
-
-    LOG.info("------ Creating Residual Plot --------------------------")
-    LOG.info(f"------   Set x to {FEATURE_LABEL} ----------------------")
-    LOG.info("------   Set y to the residual (actual - fitted) -------")
-
-    # Open a fresh blank canvas before a new chart
-    plt.figure()
-
-    residual_plt: Axes = sns.scatterplot(
-        x=feature_values,
-        y=residuals,
-    )
-
-    # A reference line at residual = 0. Points scattered randomly around
-    # this line (no pattern) is what a good straight-line fit looks like.
-    residual_plt.axhline(0)
-
-    residual_plt.set_xlabel(FEATURE_LABEL)
-    residual_plt.set_ylabel(f"Residual ({TARGET_LABEL})")
-    residual_plt.set_title(f"Residuals vs {FEATURE_LABEL}")
-
-    # IN NOTEBOOK: SHOW AS YOU GO
-    #      plt.show() displays the current chart and closes it
-    # IN SCRIPT: WAIT TO SHOW TILL THE END
-    #      Do not call plt.show() here - plt.show() is called once at end.
-    # plt.show()
-
-
-# === Section 9. Summary and Next Steps ===
-
-
-def summarize(
-    df: pd.DataFrame, df_model: pd.DataFrame, model: LinearRegression
-) -> None:
-    """Log a brief summary of the model and what to examine next.
-
-    WHY: Regression is not a final answer.
-    The summary records what was fit
-    and points to what the analyst still has to decide.
-
-    Arguments:
-        df: The original DataFrame.
-        df_model: The cleaned modeling view.
-        model: The fitted scikit-learn model.
-
-    Returns:
-        None
-    """
-    slope: float = float(model.coef_[0])
-    intercept: float = float(model.intercept_)
-
-    LOG.info("========================")
-    LOG.info("SUMMARY")
-    LOG.info("========================")
-    LOG.info(f"Dataset: {DATASET_NAME}")
-    LOG.info(f"Feature (x): {FEATURE_COL}")
-    LOG.info(f"Target  (y): {TARGET_COL}")
-
-    LOG.info(f"Original rows: {df.shape[0]}")
-    LOG.info(f"Model rows:    {df_model.shape[0]}")
-
-    LOG.info("Fitted line:")
-    LOG.info(f"  {TARGET_COL} = {slope:.6g} * {FEATURE_COL} + {intercept:.6g}")
-
-    LOG.info("======================")
-    LOG.info("Review the fit numbers (R-squared, RMSE). ")
-    LOG.info("Look at the fitted-line plot and the residual plot. ")
-    LOG.info("Decide if a `straight line` is a fair description. ")
-    LOG.info("If the residuals DO show a pattern (e.g. curve, funnel, clusters),")
-    LOG.info("then a straight line is NOT a good description. ")
-    LOG.info("If the residuals DO NOT show a pattern,")
-    LOG.info("then a straight line MIGHT be a good description. ")
-    LOG.info("Either way, the findings may be valuable.")
-    LOG.info("======================")
-    LOG.info("Repeat with a different feature, or a transformed feature, ")
-    LOG.info("to investigate other options.")
-    LOG.info("======================")
-    LOG.info("Include instructions and specifics in your README.md file.")
-    LOG.info("Write up your narrative on your docs/index.md file.")
-    LOG.info("Include your next step suggestions for further analysis or modeling.")
-    LOG.info("======================")
+The evaluation metrics and residual plot
+will help assess whether the model is useful.
+"""
 
 
 # === DEFINE THE MAIN FUNCTION ===
 
 
 def main() -> None:
-    """Main function to run the linear regression workflow."""
-    log_header(LOG, "REGRESSION")
+    """Entry point when running this file as a Python script.
 
-    LOG.info("========================")
+    This is where the instructions begin.
+
+    Arguments: None.
+    Returns: None.
+    """
+    log_header(LOG, "P06 - LINEAR REGRESSION - CO2")
+
+    LOG.info("===================================")
     LOG.info("START main()")
-    LOG.info("========================")
+    LOG.info("===================================")
 
-    LOG.info(f"--- Section 2: Load dataset: {DATASET_NAME} ---")
-    df = load_data()
+    LOG.info("-------------------------------")
+    LOG.info("01. OBSERVE the data and prior findings.")
+    LOG.info("-------------------------------")
 
-    LOG.info("--- Section 3: Prepare a modeling view (feature + target) ---")
-    df_model = make_model_view(df)
+    log_path(LOG, "data file", path=DATA_FILE_PATH)
 
-    LOG.info("--- Section 4: Build feature matrix X and target vector y ---")
-    X, y = build_x_and_y(df_model)
+    df: pd.DataFrame = pd.read_csv(DATA_FILE_PATH)
 
-    LOG.info("--- Section 5: Fit a straight line (numpy and scikit-learn) ---")
-    model = fit_line(X, y)
+    LOG.info("Data loaded successfully.")
+    LOG.info(f"Grain: {GRAIN}")
+    LOG.info(f"Rows: {df.shape[0]}")
+    LOG.info(f"Columns: {df.shape[1]}")
+    LOG.info(f"Column names: {df.columns.tolist()}")
 
-    LOG.info("--- Section 6: Predict fitted values and an example value ---")
-    y_hat = predict(model, X)
+    LOG.info("-------------------------------")
+    LOG.info("02. DECLARE the target and feature.")
+    LOG.info("-------------------------------")
 
-    LOG.info("--- Section 7: Examine the fit (residuals, R-squared, RMSE) ---")
-    residuals = examine_fit(model, X, y, y_hat)
+    LOG.info(f"Target:  {TARGET_COLUMN}")
+    LOG.info(f"Feature: {FEATURE_COLUMN}")
+    LOG.info(FEATURE_DECISION)
 
-    LOG.info("--- Section 8: Charts ---")
-    make_plots(df_model, y_hat, residuals)
+    LOG.info("-------------------------------")
+    LOG.info("03. PREPARE the modeling data.")
+    LOG.info("-------------------------------")
 
-    LOG.info("--- Section 9: Summary and next steps ---")
-    summarize(df, df_model, model)
+    # A regression model requires a value
+    # for both the selected feature and target.
+    # Keep the original DataFrame unchanged.
+    # Create a separate modeling DataFrame
+    # containing complete feature / target pairs.
+
+    required_columns: list[str] = [
+        FEATURE_COLUMN,
+        TARGET_COLUMN,
+    ]
+
+    df_model: pd.DataFrame = df.dropna(
+        subset=required_columns
+    ).copy()
+
+    count_original: int = df.shape[0]
+    count_model: int = df_model.shape[0]
+    count_dropped: int = count_original - count_model
+
+    LOG.info(f"Original rows: {count_original}")
+    LOG.info(f"Modeling rows: {count_model}")
+    LOG.info(f"Rows dropped: {count_dropped}")
+
+    # scikit-learn expects X to be a 2-dimensional
+    # feature matrix and y to be a 1-dimensional target.
+
+    X: pd.DataFrame = df_model[[FEATURE_COLUMN]]
+    y: pd.Series = df_model[TARGET_COLUMN]
+
+    LOG.info(f"X shape: {X.shape}")
+    LOG.info(f"y shape: {y.shape}")
+
+    LOG.info("-------------------------------")
+    LOG.info("04. SPLIT into training and test data.")
+    LOG.info("-------------------------------")
+
+    LOG.info(SPLIT_DECISION)
+
+    X_train: pd.DataFrame
+    X_test: pd.DataFrame
+    y_train: pd.Series
+    y_test: pd.Series
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=TEST_FRACTION,
+        random_state=RANDOM_SEED,
+    )
+
+    LOG.info(f"Training rows: {X_train.shape[0]}")
+    LOG.info(f"Test rows: {X_test.shape[0]}")
+
+    LOG.info("-------------------------------")
+    LOG.info("05. BASELINE with a simple reference model.")
+    LOG.info("-------------------------------")
+
+    LOG.info(BASELINE_DECISION)
+
+    baseline_model = DummyRegressor(
+        strategy=BASELINE_STRATEGY,
+    )
+
+    baseline_model.fit(
+        X_train,
+        y_train,
+    )
+
+    baseline_predictions: np.ndarray = baseline_model.predict(
+        X_test
+    )
+
+    baseline_rmse: float = float(
+        root_mean_squared_error(
+            y_test,
+            baseline_predictions,
+        )
+    )
+
+    baseline_r_squared: float = float(
+        r2_score(
+            y_test,
+            baseline_predictions,
+        )
+    )
+
+    LOG.info(f"Baseline strategy: {BASELINE_STRATEGY}")
+    LOG.info(f"Baseline RMSE: {baseline_rmse:.2f}")
+    LOG.info(
+        f"Baseline R-squared: {baseline_r_squared:.3f}"
+    )
+
+    LOG.info("-------------------------------")
+    LOG.info("06. TRAIN a LinearRegression model.")
+    LOG.info("-------------------------------")
+
+    LOG.info(MODEL_DECISION)
+
+    model = LinearRegression()
+
+    model.fit(
+        X_train,
+        y_train,
+    )
+
+    slope: float = float(model.coef_[0])
+    intercept: float = float(model.intercept_)
+
+    LOG.info("The model learned this line:")
+    LOG.info(
+        f"{TARGET_COLUMN} = "
+        f"{slope:.6g} * {FEATURE_COLUMN} "
+        f"+ {intercept:.6g}"
+    )
+
+    LOG.info("-------------------------------")
+    LOG.info("07. PREDICT on X_test.")
+    LOG.info("-------------------------------")
+
+    # The model has never trained on X_test.
+    # Use the trained model to predict target values
+    # for these held-back observations.
+
+    model_predictions: np.ndarray = model.predict(
+        X_test
+    )
 
     LOG.info(
-        "----- in a script, call plt.show() once at the end to display all charts -----"
+        f"Predictions created: {len(model_predictions)}"
+    )
+
+    LOG.info("-------------------------------")
+    LOG.info("08. EVALUATE baseline vs model on y_test.")
+    LOG.info("-------------------------------")
+
+    # RMSE measures prediction error
+    # in the same units as the target.
+    # Lower RMSE is better.
+
+    model_rmse: float = float(
+        root_mean_squared_error(
+            y_test,
+            model_predictions,
+        )
+    )
+
+    # R-squared describes how much of the variation
+    # in the test target is accounted for by the model.
+    # Larger values generally indicate a better fit.
+
+    model_r_squared: float = float(
+        r2_score(
+            y_test,
+            model_predictions,
+        )
+    )
+
+    LOG.info("BASELINE RESULTS")
+    LOG.info(f"RMSE:      {baseline_rmse:.2f}")
+    LOG.info(
+        f"R-squared: {baseline_r_squared:.3f}"
+    )
+
+    LOG.info("LINEAR REGRESSION RESULTS")
+    LOG.info(f"RMSE:      {model_rmse:.2f}")
+    LOG.info(
+        f"R-squared: {model_r_squared:.3f}"
+    )
+
+    LOG.info("-------------------------------")
+    LOG.info("09. VISUALIZE predictions and residuals.")
+    LOG.info("-------------------------------")
+
+    CHART_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # === PREDICTIONS CHART ===
+
+    # Plot the actual test observations.
+
+    _prediction_figure, prediction_ax = plt.subplots()
+
+    x_test_values: np.ndarray = (
+        X_test[FEATURE_COLUMN].to_numpy()
+    )
+    y_test_values: np.ndarray = y_test.to_numpy()
+
+    prediction_ax.scatter(
+        x_test_values,
+        y_test_values,
+        label="Actual",
+    )
+
+    # Sort x values so the regression line
+    # is drawn from left to right.
+
+    prediction_order: np.ndarray = np.argsort(
+        x_test_values
+    )
+
+    prediction_ax.plot(
+        x_test_values[prediction_order],
+        model_predictions[prediction_order],
+        label="Predicted",
+    )
+
+    # CUSTOM: The analyst can customize
+    # the returned Matplotlib Axes object.
+
+    prediction_ax.set_title(
+        "GDP vs. CO2 Emissions"
+    )
+    prediction_ax.set_xlabel(
+        "GDP"
+    )
+    prediction_ax.set_ylabel(
+        "CO2 Emissions"
+    )
+    prediction_ax.legend()
+
+    save_chart(
+        prediction_ax,
+        PREDICTION_CHART_PATH,
+    )
+
+    LOG.info(
+        f"Chart saved successfully at "
+        f"{PREDICTION_CHART_PATH}."
+    )
+
+    # === RESIDUAL CHART ===
+
+    # A residual is:
+    #
+    # actual value - predicted value
+    #
+    # Residuals near zero indicate predictions
+    # close to the observed target values.
+
+    residuals: np.ndarray = (
+        y_test_values - model_predictions
+    )
+
+    _residual_figure, residual_ax = plt.subplots()
+
+    residual_ax.scatter(
+        x_test_values,
+        residuals,
+    )
+
+    # Draw a horizontal reference line at zero.
+
+    residual_ax.axhline(0)
+
+    # CUSTOM: The analyst can customize
+    # the returned Matplotlib Axes object.
+
+    residual_ax.set_title(
+        "Residuals for GDP Model"
+    )
+    residual_ax.set_xlabel(
+        "GDP"
+    )
+    residual_ax.set_ylabel(
+        "Residual (Actual - Predicted CO2 Emissions)"
+    )
+
+    save_chart(
+        residual_ax,
+        RESIDUAL_CHART_PATH,
+    )
+
+    LOG.info(
+        f"Chart saved successfully at "
+        f"{RESIDUAL_CHART_PATH}."
+    )
+
+    LOG.info("-------------------------------")
+    LOG.info("10. ASSESS the results.")
+    LOG.info("-------------------------------")
+
+    # Run this app first.
+    # Review the baseline and model metrics.
+    # Review both visualizations.
+    # Then record your CUSTOM observations
+    # in a simple multi-line raw string.
+
+    LOG.info(r"""CUSTOM OBSERVATIONS:
+    I used GDP to predict CO2 emissions.
+
+    The baseline RMSE was ...
+    The LinearRegression RMSE was ...
+
+    Compared with the baseline,
+    the LinearRegression model ...
+
+    The model R-squared was ...
+
+    In the residual plot, I observed ...
+
+    Based on this evidence,
+    I conclude ...
+
+    Next, I would like to try ...
+    """)
+
+    LOG.info(
+        "In a script, call plt.show() at the end "
+        "to display all charts."
     )
     LOG.info(
-        "----- in a script, close the chart windows (with the close button) to continue  -----"
+        "Close all chart windows "
+        "(with the close button) to continue."
     )
+
     plt.show()
 
-    LOG.info("Linear regression workflow complete")
-    LOG.info("IMPORTANT: This script creates chart windows.")
-    LOG.info(
-        "Close any chart windows and terminate this process with CTRL+c as needed."
-    )
-    LOG.info("========================")
-    LOG.info("Executed successfully!")
-    LOG.info("========================")
+    LOG.info("===================================")
+    LOG.info("END main() - Executed successfully!")
+    LOG.info("===================================")
 
 
 # === CONDITIONAL EXECUTION GUARD ===
 
-# WHY: Only call main() when running this file directly as a script.
-# This is standard Python boilerplate.
-
 if __name__ == "__main__":
     main()
+
